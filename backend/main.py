@@ -1,13 +1,19 @@
-import os, uuid, json, threading, subprocess, re
+import os, uuid, json, threading, subprocess, re, shutil
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 ROOT=Path(os.getenv('DATA_DIR','data')).resolve(); ROOT.mkdir(parents=True,exist_ok=True)
 app=FastAPI(); app.add_middleware(CORSMiddleware,allow_origins=os.getenv('ORIGINS','http://localhost:5173').split(','),allow_methods=['GET','POST'],allow_headers=['*'])
-app.mount('/models',StaticFiles(directory=ROOT),name='models')
+from fastapi.responses import FileResponse
+@app.get('/models/{id}/export/{filename}')
+def model_file(id:str,filename:str):
+    if not re.fullmatch('[a-f0-9]{32}',id) or not re.fullmatch(r'[A-Za-z0-9_.-]+\.ply',filename): raise HTTPException(404)
+    p=ROOT/id/'export'/filename
+    if not p.is_file(): raise HTTPException(404)
+    return FileResponse(p)
 lock=threading.Lock()
 class Job(BaseModel):
     url:str
@@ -31,7 +37,8 @@ def worker(d,j,v):
     state={'id':d.name,'status':'running','engine':j.engine}
     with lock:
         try:
-            run(d,state,'download',['yt-dlp','--no-playlist','--max-filesize','500M','-f','bv*[height<=1080]+ba/b[height<=1080]','--merge-output-format','mp4','-o',str(d/'video.%(ext)s'),'https://www.youtube.com/watch?v='+v])
+            if v is not None:
+                run(d,state,'download',['yt-dlp','--no-playlist','--max-filesize','500M','-f','bv*[height<=1080]+ba/b[height<=1080]','--merge-output-format','mp4','-o',str(d/'video.%(ext)s'),'https://www.youtube.com/watch?v='+v])
             video=next(d.glob('video.*'))
             run(d,state,'reconstruction',['ns-process-data','video','--data',str(video),'--output-dir',str(d/'scene'),'--num-frames-target',str(j.frames)])
             if j.engine=='gsplat':
@@ -51,6 +58,29 @@ def create(j:Job):
     except ValueError as e: raise HTTPException(400,str(e))
     if j.engine not in ('gsplat','keras'): raise HTTPException(400,'Unknown engine')
     d=ROOT/uuid.uuid4().hex; d.mkdir(); save(d,{'id':d.name,'status':'queued'}); threading.Thread(target=worker,args=(d,j,v),daemon=True).start(); return {'id':d.name}
+MAX_UPLOAD=500*1024*1024
+@app.post('/jobs/upload',status_code=202)
+def upload(video:UploadFile=File(...),engine:str=Form('gsplat'),frames:int=Form(200,ge=20,le=800),iterations:int=Form(7000,ge=100,le=50000)):
+    if engine not in ('gsplat','keras'): raise HTTPException(400,'Unknown engine')
+    ext=Path(video.filename or '').suffix.lower()
+    if ext not in ('.mp4','.mov','.avi','.webm','.mkv','.m4v'): raise HTTPException(415,'Unsupported video format')
+    d=ROOT/uuid.uuid4().hex; d.mkdir()
+    try:
+        total=0
+        with (d/('video'+ext)).open('wb') as target:
+            while chunk:=video.file.read(1024*1024):
+                total+=len(chunk)
+                if total>MAX_UPLOAD: raise HTTPException(413,'Video exceeds 500 MiB')
+                target.write(chunk)
+        if not total: raise HTTPException(400,'Empty video')
+        j=Job(url='',engine=engine,frames=frames,iterations=iterations)
+        save(d,{'id':d.name,'status':'queued','source':'upload'})
+        threading.Thread(target=worker,args=(d,j,None),daemon=True).start()
+        return {'id':d.name}
+    except Exception:
+        shutil.rmtree(d,ignore_errors=True)
+        raise
+    finally: video.file.close()
 @app.get('/jobs/{id}')
 def status(id:str):
     if not re.fullmatch('[a-f0-9]{32}',id): raise HTTPException(404)
