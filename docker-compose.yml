@@ -1,12 +1,16 @@
 services:
   worker:
+    image: youtube-splat-worker:local
+    pull_policy: never
     build:
       context: .
       args:
         INSTALL_KERAS: ${INSTALL_KERAS:-false}
     gpus: all
     ports: ['127.0.0.1:8000:8000']
-    volumes: ['./data:/data']
+    volumes:
+      - ./data:/data
+      - ./backend:/app/backend:ro
     environment:
       COLMAP_CPU: ${COLMAP_CPU:-false}
       ORIGINS: ${ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
