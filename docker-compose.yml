@@ -1,0 +1,11 @@
+services:
+  worker:
+    build:
+      context: .
+      args:
+        INSTALL_KERAS: ${INSTALL_KERAS:-false}
+    gpus: all
+    ports: ['8000:8000']
+    volumes: ['./data:/data']
+    environment:
+      ORIGINS: ${ORIGINS:-http://localhost:5173}
