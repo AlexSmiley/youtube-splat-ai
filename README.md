@@ -18,3 +18,8 @@ POST /jobs accepts url, engine (gsplat or keras), frames and iterations. GET /jo
 
 ## Upload a video from your device
 Select **Upload from device** in the Video source menu, browse for an MP4, MOV, AVI, WebM, MKV or M4V file (maximum 500 MiB), select the engine and quality, and generate. The browser sends multipart data directly to the GPU backend at POST /jobs/upload; uploaded videos skip YouTube ingestion and use the same reconstruction pipeline. Extension and size are checked; decoding is performed during reconstruction. Configure reverse proxy body limits and authentication before public use. Uploaded files persist on the worker volume; only exported PLY files are served by the model endpoint. Upload tests mock the training worker and do not verify real video decoding.
+
+## Production frontend
+https://youtube-splat-ai.vercel.app
+
+Use the Vercel Vite project with root directory `frontend`, build command `npm run build`, output `dist`. Do not select FastAPI for this project. The GPU service entrypoint is `backend.main:app` and runs via Docker/Uvicorn outside Vercel. Configure `VITE_API_URL` at build time or enter the HTTPS GPU worker URL in the dashboard and test `/health`. Set worker `ORIGINS=https://youtube-splat-ai.vercel.app,https://youtube-splat-ai-acme-fdd1.vercel.app`. Production does not default to localhost.
