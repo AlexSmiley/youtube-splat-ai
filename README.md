@@ -32,3 +32,6 @@ If feature extraction aborts with Qt xcb or cv2/qt/plugins errors, rebuild the w
 
 ## Video and frame cache
 Repeated YouTube IDs reuse completed downloads. Identical uploaded file bytes (SHA-256) reuse extracted frames; the upload itself is still transmitted. Frames are cached separately per requested frame count, under `data/cache`. Changing training iterations or engine does not invalidate frames. Failed COLMAP jobs retain completed cached frames. Reconstruction and training still run for each job. Cache entries are published only after successful extraction; old jobs from before this feature are not imported. Stop the worker before deleting `data/cache` to reclaim disk space or force fresh downloads. No automatic eviction is implemented.
+
+## Live stage progress
+The dashboard polls job status every two seconds. FFmpeg machine-readable frame counters drive extraction progress; cached frames are immediately complete. Training progress uses reported Nerfstudio iteration lines or explicit Keras iteration logs. The API exposes frames_done, frames_total, frames_complete, training_done and training_total. Overall progress remains a stage estimate. Nerfstudio output parsing depends on its console format; if no iteration lines are recognized, the counter may remain unchanged until training finishes. Rebuild the local worker after updating.
