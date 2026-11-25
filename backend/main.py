@@ -26,13 +26,23 @@ def video_id(url):
     return v
 def save(d,state):
     tmp=d/'state.tmp'; tmp.write_text(json.dumps(state)); tmp.replace(d/'state.json')
+def subprocess_env():
+    env=os.environ.copy()
+    for key in ('QT_PLUGIN_PATH','QT_QPA_PLATFORM_PLUGIN_PATH','QT_QPA_FONTDIR'):
+        env.pop(key,None)
+    env['QT_QPA_PLATFORM']='offscreen'
+    env['PYTHONUNBUFFERED']='1'
+    return env
+
 def run(d,state,stage,cmd):
     state.update(stage=stage); save(d,state)
     with (d/'training.log').open('a') as log:
-        p=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1)
+        p=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1,errors='replace',env=subprocess_env())
         for line in p.stdout:
-            log.write(line); log.flush(); state['last_log']=line.strip()[-500:]; save(d,state)
-        if p.wait(): raise RuntimeError(stage+' failed; see log')
+            log.write(line); log.flush()
+            if line.strip(): state['last_log']=line.strip()[-500:]; save(d,state)
+        code=p.wait()
+        if code: raise RuntimeError(f'{stage} failed (exit {code}); see training.log')
 def worker(d,j,v):
     state={'id':d.name,'status':'running','engine':j.engine}
     with lock:
@@ -40,7 +50,7 @@ def worker(d,j,v):
             if v is not None:
                 run(d,state,'download',['yt-dlp','--no-playlist','--max-filesize','500M','-f','bv*[height<=1080]+ba/b[height<=1080]','--merge-output-format','mp4','-o',str(d/'video.%(ext)s'),'https://www.youtube.com/watch?v='+v])
             video=next(d.glob('video.*'))
-            run(d,state,'reconstruction',['ns-process-data','video','--data',str(video),'--output-dir',str(d/'scene'),'--num-frames-target',str(j.frames)])
+            run(d,state,'reconstruction',['ns-process-data','video','--data',str(video),'--output-dir',str(d/'scene'),'--num-frames-target',str(j.frames)]+(['--no-gpu'] if os.getenv('COLMAP_CPU','false').lower()=='true' else []))
             if j.engine=='gsplat':
                 run(d,state,'training',['ns-train','splatfacto','--data',str(d/'scene'),'--output-dir',str(d/'runs'),'--max-num-iterations',str(j.iterations),'--vis','tensorboard'])
                 config=next((d/'runs').rglob('config.yml'))
