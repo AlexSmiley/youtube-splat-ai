@@ -15,3 +15,6 @@ POST /jobs accepts url, engine (gsplat or keras), frames and iterations. GET /jo
 
 ## Tests
 `python -m pytest -q` runs URL validation tests. `python -m compileall backend` checks syntax. Full GPU training, Docker builds and browser rendering require separate integration verification. COLMAP requires sufficient overlapping viewpoints and a mostly static scene; YouTube access may fail due to platform restrictions.
+
+## Upload a video from your device
+Select **Upload from device** in the Video source menu, browse for an MP4, MOV, AVI, WebM, MKV or M4V file (maximum 500 MiB), select the engine and quality, and generate. The browser sends multipart data directly to the GPU backend at POST /jobs/upload; uploaded videos skip YouTube ingestion and use the same reconstruction pipeline. Extension and size are checked; decoding is performed during reconstruction. Configure reverse proxy body limits and authentication before public use. Uploaded files persist on the worker volume; only exported PLY files are served by the model endpoint. Upload tests mock the training worker and do not verify real video decoding.
