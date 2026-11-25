@@ -1,4 +1,4 @@
-import os, uuid, json, threading, subprocess, re, shutil
+import os, uuid, json, threading, subprocess, re, shutil, hashlib
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
@@ -43,14 +43,68 @@ def run(d,state,stage,cmd):
             if line.strip(): state['last_log']=line.strip()[-500:]; save(d,state)
         code=p.wait()
         if code: raise RuntimeError(f'{stage} failed (exit {code}); see training.log')
+def cache_note(d,state,message):
+    state['last_log']=message
+    with (d/'training.log').open('a') as log: log.write(message+'\n')
+    save(d,state)
+
+def cached_video(d,state,v):
+    if v is None:
+        video=next(d.glob('video.*'))
+        digest=hashlib.sha256()
+        with video.open('rb') as f:
+            for chunk in iter(lambda:f.read(1024*1024),b''): digest.update(chunk)
+        return video,'upload-'+digest.hexdigest()
+    key='youtube-'+v
+    cache=ROOT/'cache'/key
+    cache.mkdir(parents=True,exist_ok=True)
+    marker=cache/'video.json'
+    if marker.is_file():
+        name=json.loads(marker.read_text())['name']
+        video=cache/name
+        if video.is_file() and video.stat().st_size:
+            state['download_cached']=True
+            cache_note(d,state,'Cache hit: skipping YouTube download')
+            return video,key
+    tmp=cache/('download-'+uuid.uuid4().hex)
+    tmp.mkdir()
+    try:
+        run(d,state,'download',['yt-dlp','--no-playlist','--max-filesize','500M','-f','bv*[height<=1080]+ba/b[height<=1080]','--merge-output-format','mp4','-o',str(tmp/'video.%(ext)s'),'https://www.youtube.com/watch?v='+v])
+        video=next(p for p in tmp.glob('video.*') if p.suffix not in ('.part','.ytdl') and p.stat().st_size)
+        dest=cache/video.name
+        video.replace(dest)
+        marker.write_text(json.dumps({'name':dest.name}))
+        return dest,key
+    finally: shutil.rmtree(tmp,ignore_errors=True)
+
+def cached_frames(d,state,video,key,count):
+    cache=ROOT/'cache'/key
+    cache.mkdir(parents=True,exist_ok=True)
+    dest=cache/f'frames-v1-{count}'
+    if (dest/'.complete').is_file() and any(dest.glob('*.jpg')):
+        state['frames_cached']=True
+        cache_note(d,state,'Cache hit: skipping frame extraction')
+        return dest
+    tmp=cache/('frames-'+uuid.uuid4().hex)
+    tmp.mkdir()
+    try:
+        duration=float(subprocess.check_output(['ffprobe','-v','error','-show_entries','format=duration','-of','default=noprint_wrappers=1:nokey=1',str(video)],text=True).strip())
+        if duration<=0: raise ValueError('Invalid video duration')
+        run(d,state,'frames',['ffmpeg','-nostdin','-y','-i',str(video),'-vf',f'fps={count/duration:.12f}','-frames:v',str(count),'-q:v','2',str(tmp/'frame_%06d.jpg')])
+        if not any(tmp.glob('*.jpg')): raise RuntimeError('No video frames extracted')
+        (tmp/'.complete').write_text('ok')
+        if dest.exists(): shutil.rmtree(dest)
+        tmp.replace(dest)
+        return dest
+    finally: shutil.rmtree(tmp,ignore_errors=True)
+
 def worker(d,j,v):
     state={'id':d.name,'status':'running','engine':j.engine}
     with lock:
         try:
-            if v is not None:
-                run(d,state,'download',['yt-dlp','--no-playlist','--max-filesize','500M','-f','bv*[height<=1080]+ba/b[height<=1080]','--merge-output-format','mp4','-o',str(d/'video.%(ext)s'),'https://www.youtube.com/watch?v='+v])
-            video=next(d.glob('video.*'))
-            run(d,state,'reconstruction',['ns-process-data','video','--data',str(video),'--output-dir',str(d/'scene'),'--num-frames-target',str(j.frames)]+(['--no-gpu'] if os.getenv('COLMAP_CPU','false').lower()=='true' else []))
+            video, key = cached_video(d,state,v)
+            frames = cached_frames(d,state,video,key,j.frames)
+            run(d,state,'reconstruction',['ns-process-data','images','--data',str(frames),'--output-dir',str(d/'scene')]+(['--no-gpu'] if os.getenv('COLMAP_CPU','false').lower()=='true' else []))
             if j.engine=='gsplat':
                 run(d,state,'training',['ns-train','splatfacto','--data',str(d/'scene'),'--output-dir',str(d/'runs'),'--max-num-iterations',str(j.iterations),'--vis','tensorboard'])
                 config=next((d/'runs').rglob('config.yml'))
