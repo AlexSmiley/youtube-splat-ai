@@ -34,13 +34,27 @@ def subprocess_env():
     env['PYTHONUNBUFFERED']='1'
     return env
 
+def update_progress(state,stage,line):
+    clean=re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]','',line)
+    total=state.get('frames_total' if stage=='frames' else 'training_total',0)
+    if stage=='frames':
+        match=re.match(r'\s*frame\s*=\s*(\d+)',clean)
+    elif stage=='training':
+        match=re.search(r'\biteration\s+(\d+)/\d+',clean,re.I) or re.match(r'\s*(\d+)\s*\(\s*\d+(?:\.\d+)?%\)',clean)
+    else: return
+    if match and total:
+        key='frames_done' if stage=='frames' else 'training_done'
+        state[key]=max(state.get(key,0),min(total,int(match.group(1))))
+
 def run(d,state,stage,cmd):
     state.update(stage=stage); save(d,state)
     with (d/'training.log').open('a') as log:
         p=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1,errors='replace',env=subprocess_env())
         for line in p.stdout:
             log.write(line); log.flush()
-            if line.strip(): state['last_log']=line.strip()[-500:]; save(d,state)
+            if line.strip():
+                update_progress(state,stage,line)
+                state['last_log']=line.strip()[-500:]; save(d,state)
         code=p.wait()
         if code: raise RuntimeError(f'{stage} failed (exit {code}); see training.log')
 def cache_note(d,state,message):
@@ -83,6 +97,8 @@ def cached_frames(d,state,video,key,count):
     dest=cache/f'frames-v1-{count}'
     if (dest/'.complete').is_file() and any(dest.glob('*.jpg')):
         state['frames_cached']=True
+        state['frames_done']=len(list(dest.glob('*.jpg')))
+        state['frames_complete']=True
         cache_note(d,state,'Cache hit: skipping frame extraction')
         return dest
     tmp=cache/('frames-'+uuid.uuid4().hex)
@@ -90,8 +106,11 @@ def cached_frames(d,state,video,key,count):
     try:
         duration=float(subprocess.check_output(['ffprobe','-v','error','-show_entries','format=duration','-of','default=noprint_wrappers=1:nokey=1',str(video)],text=True).strip())
         if duration<=0: raise ValueError('Invalid video duration')
-        run(d,state,'frames',['ffmpeg','-nostdin','-y','-i',str(video),'-vf',f'fps={count/duration:.12f}','-frames:v',str(count),'-q:v','2',str(tmp/'frame_%06d.jpg')])
+        run(d,state,'frames',['ffmpeg','-nostdin','-y','-progress','pipe:1','-nostats','-i',str(video),'-vf',f'fps={count/duration:.12f}','-frames:v',str(count),'-q:v','2',str(tmp/'frame_%06d.jpg')])
         if not any(tmp.glob('*.jpg')): raise RuntimeError('No video frames extracted')
+        state['frames_done']=len(list(tmp.glob('*.jpg')))
+        state['frames_complete']=True
+        save(d,state)
         (tmp/'.complete').write_text('ok')
         if dest.exists(): shutil.rmtree(dest)
         tmp.replace(dest)
@@ -99,7 +118,7 @@ def cached_frames(d,state,video,key,count):
     finally: shutil.rmtree(tmp,ignore_errors=True)
 
 def worker(d,j,v):
-    state={'id':d.name,'status':'running','engine':j.engine}
+    state={'id':d.name,'status':'running','engine':j.engine,'frames_total':j.frames,'frames_done':0,'training_total':j.iterations,'training_done':0}
     with lock:
         try:
             video, key = cached_video(d,state,v)
@@ -107,10 +126,12 @@ def worker(d,j,v):
             run(d,state,'reconstruction',['ns-process-data','images','--data',str(frames),'--output-dir',str(d/'scene')]+(['--no-gpu'] if os.getenv('COLMAP_CPU','false').lower()=='true' else []))
             if j.engine=='gsplat':
                 run(d,state,'training',['ns-train','splatfacto','--data',str(d/'scene'),'--output-dir',str(d/'runs'),'--max-num-iterations',str(j.iterations),'--vis','tensorboard'])
+                state['training_done']=j.iterations; save(d,state)
                 config=next((d/'runs').rglob('config.yml'))
                 run(d,state,'export',['ns-export','gaussian-splat','--load-config',str(config),'--output-dir',str(d/'export')])
             else:
                 run(d,state,'training',['python','-m','backend.keras_engine',str(d/'scene'),str(d/'export'),str(j.iterations)])
+            state['training_done']=j.iterations
             model=next((d/'export').glob('*.ply')); state.update(status='completed',stage='done',model=f'/models/{d.name}/export/{model.name}')
         except Exception as e: state.update(status='failed',error=str(e))
         save(d,state)
