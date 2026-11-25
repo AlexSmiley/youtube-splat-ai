@@ -18,7 +18,7 @@ def train(scene,out,steps):
         with tf.GradientTape() as tape:
             cam=pos@tf.constant(mat[:3,:3].T)+mat[:3,3]; z=-cam[:,2]; safe=tf.maximum(z,.01); uv=tf.stack([fx*cam[:,0]/safe+cx,-fy*cam[:,1]/safe+cy],1); sigma=tf.maximum(tf.exp(scale)*fx/safe,.3); dist=tf.reduce_sum((grid[None]-uv[:,None,None,:])**2,axis=-1); a=tf.exp(-dist/(2*sigma[:,None,None]**2))*tf.sigmoid(opacity)[:,None,None]*tf.cast(z[:,None,None]>0,tf.float32); order=tf.argsort(z); a=tf.gather(a,order); weights=a*tf.math.cumprod(1-a,axis=0,exclusive=True); render=tf.einsum('nhw,nc->hwc',weights,tf.gather(tf.sigmoid(rgb),order)); loss=tf.reduce_mean((render-im)**2)
         variables=[pos,rgb,scale,opacity]; opt.apply_gradients(zip(tape.gradient(loss,variables),variables))
-        if i%10==0: print(f'iteration {i}/{steps} loss={float(loss):.6f}',flush=True)
+        if (i+1)%10==0 or i==0 or i+1==steps: print(f'iteration {i+1}/{steps} loss={float(loss):.6f}',flush=True)
     names=['x','y','z','nx','ny','nz','f_dc_0','f_dc_1','f_dc_2','opacity','scale_0','scale_1','scale_2','rot_0','rot_1','rot_2','rot_3']; data=np.zeros(len(xyz),dtype=[(n,'f4') for n in names]); values=np.column_stack([pos.numpy(),np.zeros_like(xyz),(tf.sigmoid(rgb).numpy()-.5)/.28209479177,opacity.numpy(),np.repeat(scale.numpy()[:,None],3,1),np.tile([1,0,0,0],(len(xyz),1))]);
     for k,n in enumerate(names): data[n]=values[:,k]
     PlyData([PlyElement.describe(data,'vertex')]).write(out/'model.ply')
