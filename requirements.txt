@@ -4,3 +4,4 @@ yt-dlp
 nerfstudio==1.1.5
 plyfile
 Pillow
+python-multipart>=0.0.18,<1
