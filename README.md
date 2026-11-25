@@ -1,37 +1,202 @@
 # YouTube Splat AI
 
-Prototype for reconstructing static scenes from authorized YouTube videos. React dashboard, FastAPI job service, Nerfstudio Splatfacto and experimental TensorFlow/Keras Gaussian renderer. The latter uses 512 isotropic Gaussians and 48x48 training images; it is not equivalent to full 3DGS. Both export PLY; other formats are not implemented.
+Video-to-3D Gaussian Splat reconstruction studio with a React/Vite dashboard, FastAPI GPU worker, FFmpeg, COLMAP, Nerfstudio Splatfacto and an experimental TensorFlow/Keras renderer.
 
-## Local GPU
-Linux, NVIDIA GPU, compatible CUDA driver and NVIDIA Container Toolkit required. Install Docker Compose. Run `docker compose up --build` from the root. For the optional Keras engine use `INSTALL_KERAS=true docker compose up --build`; TensorFlow and PyTorch CUDA dependencies may need separate environments if conflicts arise. Alternatively install dependencies in Python 3.10 environments, install FFmpeg and COLMAP, and run `python -m uvicorn backend.main:app --port 8000`. The Keras subprocess uses the same Python environment by default.
+**Hosted frontend:** [youtube-splat-ai.vercel.app](https://youtube-splat-ai.vercel.app) — requires a separately running HTTPS GPU worker. For local GPU processing, run both services locally.
 
-In another terminal: `cd frontend && npm install && npm run dev`. Open http://localhost:5173. Only submit videos you are authorized to download. Default video is an example URL, not a verified reconstruction.
+## Features
 
-## Cloud GPU / Vercel
-Build the same Docker image on a GPU VM or container service with persistent /data storage. Expose port 8000 through an authenticated HTTPS reverse proxy. Set ORIGINS to the exact frontend origin. In Vercel import the repository, set root directory to frontend and VITE_API_URL to the HTTPS worker endpoint. Rebuild after changing the URL. Do not deploy the Python training worker as a Vercel function. No cloud resources are provisioned by this project.
+- YouTube URL ingestion and device video uploads (MP4, MOV, AVI, WEBM, MKV, M4V; maximum 500 MiB).
+- Persistent video and frame caching across reconstruction attempts.
+- Camera pose estimation with COLMAP, including optional CPU preprocessing.
+- Splatfacto/gsplat training and experimental Keras training.
+- Overall stage indicator, measured frame and iteration counters, cache notifications and error logs.
+- Interactive Gaussian Splat viewer and PLY download.
+- Local Docker Compose mode and Vercel frontend deployment.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    A[React dashboard] --> B[FastAPI worker]
+    B --> C{Video source}
+    C --> D[YouTube download or cached video]
+    C --> E[Uploaded video and SHA-256]
+    D --> F{Frame cache}
+    E --> F
+    F -->|Miss| G[FFmpeg extraction]
+    F -->|Hit| H[Cached frames]
+    G --> H
+    H --> I[COLMAP reconstruction]
+    I --> J[gsplat or Keras training]
+    J --> K[PLY export]
+    K --> A
+    B -->|Job status polling| A
+```
+
+## Quick start — Windows WSL2 or Linux
+
+Requirements: Git, Docker Compose, compatible NVIDIA GPU and driver, Docker Desktop with WSL2 GPU support on Windows or NVIDIA Container Toolkit on Linux.
+
+```powershell
+git clone https://github.com/AlexSmiley/youtube-splat-ai.git
+cd youtube-splat-ai
+docker compose up --build
+```
+
+Open [http://localhost:5173](http://localhost:5173), select **Use local backend**, then **Test connection**. Both services bind to loopback only.
+
+| Service | URL |
+| --- | --- |
+| Local frontend | http://localhost:5173 |
+| Backend | http://localhost:8000 |
+| Health check | http://localhost:8000/health |
+| Swagger | http://localhost:8000/docs |
+
+To update an existing checkout (stop active jobs first):
+
+```powershell
+git pull origin main
+docker compose up -d --build
+```
+
+To stop: `docker compose down`. Data persists in `./data`.
+
+### Optional Keras engine
+
+PowerShell:
+
+```powershell
+$env:INSTALL_KERAS="true"
+docker compose up --build
+```
+
+On Linux: `INSTALL_KERAS=true docker compose up --build`. TensorFlow and PyTorch CUDA dependencies may require separate environments if conflicts arise. The experimental renderer uses 512 or fewer isotropic Gaussians and 48×48 images; it is not equivalent to full 3DGS.
+
+### Manual startup
+
+In a prepared Python 3.10 GPU environment with project dependencies, FFmpeg and COLMAP installed:
+
+```bash
+python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+```
+
+In another terminal:
+
+```bash
+cd frontend
+npm install
+npm run dev -- --strictPort
+```
+
+## Usage
+
+1. Connect to the worker and test its health.
+2. Select YouTube URL or Upload from device. Only process authorized videos.
+3. Select the engine and quality.
+4. Confirm permission and generate.
+5. Monitor progress and logs, then view or download the resulting PLY.
+
+Default example: https://www.youtube.com/watch?v=oxxucX4dr5k (not a verified reconstruction).
+
+| Quality | Target frames | Training iterations |
+| --- | ---: | ---: |
+| Fast | 100 | 3000 |
+| Balanced | 200 | 7000 |
+| High | 400 | 30000 |
+
+## Live progress
+
+The dashboard polls every two seconds. Overall progress is a stage estimate, not elapsed time. FFmpeg machine-readable counters drive the frame extraction bar; completed extraction may yield fewer frames than requested. Cached frames are immediately complete. Training counters use recognized Nerfstudio console iteration lines or explicit Keras iteration logs. Unrecognized Nerfstudio output may leave the counter unchanged until training finishes. Failed stages retain their last non-empty log and show errors.
+
+## Persistent cache
+
+| Scenario | Download | Frame extraction |
+| --- | --- | --- |
+| New YouTube ID | Required | Required |
+| Same ID and frame count | Reused | Reused |
+| Different engine or iterations | Reused | Reused |
+| Different frame count | Reused | Required |
+| Identical uploaded bytes and frame count | Not applicable | Reused |
+
+Uploads are identified by SHA-256 and still need to be transmitted. Completed frames survive COLMAP failures. Reconstruction and training run for every new job. Cache entries are published after successful extraction. Pre-cache jobs are not imported automatically; no automatic eviction is implemented.
+
+```text
+data/
+  cache/
+    youtube-VIDEO_ID/
+      video.mp4
+      video.json
+      frames-v1-200/
+    upload-SHA256/
+      frames-v1-200/
+  JOB_ID/
+    scene/
+    runs/
+    export/
+    state.json
+    training.log
+```
+
+Stop the worker before deleting `data/cache` to reclaim disk space or force fresh downloads.
 
 ## API
-POST /jobs accepts url, engine (gsplat or keras), frames and iterations. GET /jobs/{id} returns status, stage and latest log line, plus model URL on completion. GET /health checks API availability. Jobs are serialized in a single process; do not run multiple uvicorn workers. Restart recovery, authentication, quotas, cancellation, durable queues and full production hardening are not implemented. Do not expose the unauthenticated API publicly. The dashboard polls every two seconds. Training progress is log-based rather than a guaranteed percentage.
 
-## Tests
-`python -m pytest -q` runs URL validation tests. `python -m compileall backend` checks syntax. Full GPU training, Docker builds and browser rendering require separate integration verification. COLMAP requires sufficient overlapping viewpoints and a mostly static scene; YouTube access may fail due to platform restrictions.
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| GET | /health | API availability |
+| POST | /jobs | JSON: url, engine, frames, iterations |
+| POST | /jobs/upload | Multipart: video, engine, frames, iterations |
+| GET | /jobs/{id} | Status, stage, logs, progress and model URL |
+| GET | /models/{id}/export/{filename} | Exported PLY |
 
-## Upload a video from your device
-Select **Upload from device** in the Video source menu, browse for an MP4, MOV, AVI, WebM, MKV or M4V file (maximum 500 MiB), select the engine and quality, and generate. The browser sends multipart data directly to the GPU backend at POST /jobs/upload; uploaded videos skip YouTube ingestion and use the same reconstruction pipeline. Extension and size are checked; decoding is performed during reconstruction. Configure reverse proxy body limits and authentication before public use. Uploaded files persist on the worker volume; only exported PLY files are served by the model endpoint. Upload tests mock the training worker and do not verify real video decoding.
+Progress fields: `frames_done`, `frames_total`, `frames_complete`, `training_done`, `training_total`, `download_cached`, `frames_cached`. Cache flags may be absent on misses. Job creation returns HTTP 202 with an ID. Jobs are serialized in a single process; do not run multiple Uvicorn workers.
 
-## Production frontend
-https://youtube-splat-ai.vercel.app
+## Vercel and cloud GPU
 
-Use the Vercel Vite project with root directory `frontend`, build command `npm run build`, output `dist`. Do not select FastAPI for this project. The GPU service entrypoint is `backend.main:app` and runs via Docker/Uvicorn outside Vercel. Configure `VITE_API_URL` at build time or enter the HTTPS GPU worker URL in the dashboard and test `/health`. Set worker `ORIGINS=https://youtube-splat-ai.vercel.app,https://youtube-splat-ai-acme-fdd1.vercel.app`. Production does not default to localhost.
+Configure Vercel with root directory `frontend`, Vite framework, build command `npm run build`, output `dist`. Set `VITE_API_URL` to the HTTPS worker endpoint or enter it in the dashboard. Rebuild after changing build-time variables.
 
-## Local full-stack mode (Windows WSL2 / Linux)
-Install Docker Desktop with WSL2 GPU support on Windows, or Docker Engine and NVIDIA Container Toolkit on Linux. A compatible NVIDIA GPU and driver are required. From the repository root run `docker compose up --build` to start both services. Open http://localhost:5173, select **Use local backend**, and click **Test connection**. API health: http://localhost:8000/health. Both ports bind to loopback only. Stop with `docker compose down`; data persists in ./data. To enable experimental Keras, set INSTALL_KERAS=true before building (PowerShell: `$env:INSTALL_KERAS='true'`). The Vercel frontend remains remote-only; use the local frontend for HTTP loopback access. Without Docker, start Uvicorn with `python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000` in a prepared GPU Python environment, then run `npm install` and `npm run dev -- --strictPort` inside frontend in another terminal. Local GPU builds and training require hardware verification.
+Deploy the GPU Docker image separately with persistent /data and an authenticated HTTPS reverse proxy. Set `ORIGINS` to the exact allowed frontend origins, e.g. `https://youtube-splat-ai.vercel.app`. Configure upload limits and authentication. Do not deploy the GPU training worker as a Vercel function. Production frontend does not default to localhost; use local mode for local HTTP access. No cloud GPU resources are provisioned by this repository.
 
-## Troubleshooting headless COLMAP
-If feature extraction aborts with Qt xcb or cv2/qt/plugins errors, rebuild the worker (`docker compose build --no-cache worker`, then `docker compose up -d worker`). The image isolates COLMAP's Qt plugins from OpenCV and selects offscreen Qt. If GPU SIFT still fails (e.g. OpenGL context), set `COLMAP_CPU=true` (PowerShell: `$env:COLMAP_CPU='true'`) and run `docker compose up -d --force-recreate worker`. This selects CPU COLMAP preprocessing only; gsplat training still requires CUDA. Submit a new job and inspect `data/<job-id>/training.log` if it fails. Existing failed jobs are not resumed automatically.
+## Troubleshooting
 
-## Video and frame cache
-Repeated YouTube IDs reuse completed downloads. Identical uploaded file bytes (SHA-256) reuse extracted frames; the upload itself is still transmitted. Frames are cached separately per requested frame count, under `data/cache`. Changing training iterations or engine does not invalidate frames. Failed COLMAP jobs retain completed cached frames. Reconstruction and training still run for each job. Cache entries are published only after successful extraction; old jobs from before this feature are not imported. Stop the worker before deleting `data/cache` to reclaim disk space or force fresh downloads. No automatic eviction is implemented.
+### COLMAP Qt / xcb errors
 
-## Live stage progress
-The dashboard polls job status every two seconds. FFmpeg machine-readable frame counters drive extraction progress; cached frames are immediately complete. Training progress uses reported Nerfstudio iteration lines or explicit Keras iteration logs. The API exposes frames_done, frames_total, frames_complete, training_done and training_total. Overall progress remains a stage estimate. Nerfstudio output parsing depends on its console format; if no iteration lines are recognized, the counter may remain unchanged until training finishes. Rebuild the local worker after updating.
+The Docker image isolates COLMAP from OpenCV Qt plugins and selects offscreen Qt.
+
+```powershell
+docker compose build --no-cache worker
+docker compose up -d worker
+```
+
+If GPU SIFT or OpenGL still fails, enable CPU COLMAP preprocessing:
+
+```powershell
+$env:COLMAP_CPU="true"
+docker compose up -d --force-recreate worker
+```
+
+This does not remove the CUDA requirement for gsplat training. Submit a new job; failed jobs do not resume automatically.
+
+### GPU and logs
+
+```powershell
+docker compose exec worker nvidia-smi
+docker compose exec worker python3 -c "import torch; print(torch.cuda.is_available())"
+docker compose logs -f worker
+Get-Content .\data\JOB_ID\training.log -Tail 100
+```
+
+Replace JOB_ID with the actual job ID. For connection errors, check /health, the frontend origin and backend URL. COLMAP needs overlapping views of a mostly static scene; YouTube access may fail due to platform restrictions.
+
+## Tests and limitations
+
+```bash
+python -m pytest -q
+python -m compileall backend
+cd frontend
+npm install
+npm run build
+```
+
+URL validation and mocked upload tests are included. Full GPU reconstruction, recent Docker changes, progress parsing against real training output and browser rendering require integration verification. Only PLY export is implemented. Authentication, quotas, cancellation, restart recovery, durable queues and production hardening are not implemented. Do not expose the unauthenticated API publicly.
