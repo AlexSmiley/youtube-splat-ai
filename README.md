@@ -41,7 +41,8 @@ Requirements: Git, Docker Compose, compatible NVIDIA GPU and driver, Docker Desk
 ```powershell
 git clone https://github.com/AlexSmiley/youtube-splat-ai.git
 cd youtube-splat-ai
-docker compose up --build
+docker compose build worker
+docker compose up --no-build
 ```
 
 Open [http://localhost:5173](http://localhost:5173), select **Use local backend**, then **Test connection**. Both services bind to loopback only.
@@ -57,7 +58,8 @@ To update an existing checkout (stop active jobs first):
 
 ```powershell
 git pull origin main
-docker compose up -d --build
+docker compose up -d --no-build
+docker compose restart worker
 ```
 
 To stop: `docker compose down`. Data persists in `./data`.
@@ -200,3 +202,6 @@ npm run build
 ```
 
 URL validation and mocked upload tests are included. Full GPU reconstruction, recent Docker changes, progress parsing against real training output and browser rendering require integration verification. Only PLY export is implemented. Authentication, quotas, cancellation, restart recovery, durable queues and production hardening are not implemented. Do not expose the unauthenticated API publicly.
+
+## Reuse the GPU environment
+The local worker image is named `youtube-splat-worker:local`. Build it once successfully with `docker compose build worker`. Subsequent launches use `docker compose up -d --no-build`. Backend source is bind-mounted read-only; after git pull, restart the worker without rebuilding. Rebuild only for Dockerfile or dependency changes. Failed builds cannot reuse incomplete installation layers. Inspect storage with `docker system df -v`; avoid routine cache pruning because it removes reusable layers. Never delete ./data to clean Docker cache. Docker Desktop virtual disk space may need separate reclamation. Stop active jobs before restarting.
