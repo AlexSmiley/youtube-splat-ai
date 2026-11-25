@@ -1,0 +1,11 @@
+.git
+data
+frontend
+**/node_modules
+**/__pycache__
+**/.pytest_cache
+.venv
+venv
+*.zip
+*.ply
+*.splat
